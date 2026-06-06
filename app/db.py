@@ -427,7 +427,9 @@ def standings_detailed(chat_id: int) -> list[dict]:
         # LEFT JOIN gives a NULL country row for players with zero picks.
         if r["country_code"] is None:
             continue
-        pts = int(r["country_points"])
+        # float() preserves fractional points (0.5-per-goal-diff scoring).
+        # Do NOT int() here — that truncates 4.5 → 4 and silently rounds standings.
+        pts = float(r["country_points"])
         p["teams"].append({"country_code": r["country_code"], "points": pts})
         p["total_points"] += pts
 
@@ -442,7 +444,8 @@ def standings_detailed(chat_id: int) -> list[dict]:
     )
 
 
-def points_for_country(chat_id: int, country_code: str) -> int:
+def points_for_country(chat_id: int, country_code: str) -> float:
+    """Sum of points awarded for a country. Returns float to preserve halves."""
     with connect() as c, c.cursor() as cur:
         cur.execute(
             """
@@ -452,7 +455,7 @@ def points_for_country(chat_id: int, country_code: str) -> int:
             (chat_id, country_code),
         )
         row = cur.fetchone()
-        return int(row["pts"]) if row else 0
+        return float(row["pts"]) if row else 0.0
 
 
 def all_leagues() -> list[dict]:

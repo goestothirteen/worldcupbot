@@ -61,7 +61,7 @@ STAGE_REACH_EVENT: dict[str, tuple[str, int]] = {
 }
 
 
-def score_match_for_league(league_chat_id: int, match: dict) -> list[tuple[str, str, int]]:
+def score_match_for_league(league_chat_id: int, match: dict) -> list[tuple[str, str, float]]:
     """
     Award match-result points for a single finished match in a single league.
     Returns a list of (display_name, event_description, points_awarded) tuples
@@ -131,13 +131,12 @@ def award_stage_reached(
     return (owner["display_name"], event_type, points)
 
 
-def score_match_for_all_leagues(match: dict) -> dict[int, list[tuple[str, str, int]]]:
+def score_match_for_all_leagues(match: dict) -> dict[int, list[tuple[str, str, float]]]:
     """
     Apply match scoring across every active league. Returns
-    {chat_id: [(name, desc, pts), ...]} so the cron caller can post a per-league
-    summary to each chat.
+    {chat_id: [(name, desc, pts), ...]}.
     """
-    out: dict[int, list[tuple[str, str, int]]] = {}
+    out: dict[int, list[tuple[str, str, float]]] = {}
     for league in db.all_leagues():
         results = score_match_for_league(league["chat_id"], match)
         if results:
