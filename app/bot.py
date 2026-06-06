@@ -62,6 +62,14 @@ def _e(s) -> str:
     return html.escape(str(s), quote=False)
 
 
+def _fmt_pts(p) -> str:
+    """Render a points value cleanly: 1 -> '1', 1.5 -> '1.5', 1.0 -> '1'.
+    Accepts int, float, or Decimal (DB SUM(points) returns Decimal)."""
+    if p is None:
+        return "0"
+    return f"{float(p):g}"
+
+
 def _admin_user_ids() -> set[int]:
     raw = os.environ.get("ADMIN_USER_IDS", "")
     out = set()
@@ -433,13 +441,13 @@ async def cmd_myteam(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not my_picks:
         await update.effective_message.reply_text("You haven't drafted any teams yet.")
         return
-    total = 0
+    total = 0.0
     lines = [f"<b>{_e(me['display_name'])}'s team:</b>"]
     for p in my_picks:
         pts = await asyncio.to_thread(db.points_for_country, chat.id, p["country_code"])
-        total += pts
-        lines.append(f"  {_display_country(p['country_code'])} — {pts} pt{'s' if pts != 1 else ''}")
-    lines.append(f"\n<b>Total:</b> {total}")
+        total += float(pts)
+        lines.append(f"  {_display_country(p['country_code'])} — {_fmt_pts(pts)} pts")
+    lines.append(f"\n<b>Total:</b> {_fmt_pts(total)}")
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
@@ -465,7 +473,7 @@ async def cmd_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.effective_message.reply_text(
         f"{_display_country(country.code)} — owned by <b>{_e(owner['display_name'])}</b>, "
-        f"{pts} pt{'s' if pts != 1 else ''}.",
+        f"{_fmt_pts(pts)} pts.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -483,13 +491,12 @@ async def cmd_standings(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None
         prefix = medals[i] if i < len(medals) else f"{i+1}."
         lines.append("")  # blank line between players
         lines.append(
-            f"{prefix} <b>{_e(r['display_name'])}</b> — {r['total_points']} pts "
+            f"{prefix} <b>{_e(r['display_name'])}</b> — {_fmt_pts(r['total_points'])} pts "
             f"({len(r['teams'])} teams)"
         )
         for t in r["teams"]:
-            pts = t["points"]
             lines.append(
-                f"     {_display_country(t['country_code'])} — {pts} pt{'s' if pts != 1 else ''}"
+                f"     {_display_country(t['country_code'])} — {_fmt_pts(t['points'])} pts"
             )
         if not r["teams"]:
             lines.append("     <i>(no teams drafted yet)</i>")
@@ -548,9 +555,9 @@ async def cmd_set_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         f"📝 Recorded: {_display_country(home.code)} {hs}-{as_} {_display_country(away.code)}\n"
     )
     if awarded:
-        body += "\n<b>Match points (goal differential):</b>\n"
+        body += "\n<b>Match points (0.5 per goal of differential):</b>\n"
         for name, desc, pts in awarded:
-            body += f"  +{pts} → {_e(name)}\n"
+            body += f"  +{_fmt_pts(pts)} → {_e(name)}\n"
         body += (
             "\n<i>Reminder: stage-advancement bonuses are separate — "
             "use /set_stage_reached after each round.</i>"

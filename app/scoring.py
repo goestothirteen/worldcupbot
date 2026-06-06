@@ -4,12 +4,14 @@ Scoring engine.
 There are two INDEPENDENT scoring tracks, each producing point_events rows:
 
 1) Match points  (driven by /set_result → score_match_for_league)
-   Winner earns points equal to goal differential. Loser earns 0. Draws
+   Winner earns 0.5 points per goal of differential. Loser earns 0. Draws
    award nothing. Stage of the match does NOT affect scoring — group,
    R32, R16, QF, SF, F all use the same rule. Examples:
-     England 3-0 Ghana → England +3
-     Spain 2-1 Germany → Spain +1
+     England 3-0 Ghana → England +1.5
+     Spain 2-1 Germany → Spain +0.5
      France 1-1 Italy  → no points
+     Brazil 4-2 Korea  → Brazil +1
+   To re-tune later, edit GOAL_DIFF_WEIGHT below.
    The stored event_type is "match_win", with match_id, so it's idempotent
    per match.
 
@@ -43,6 +45,10 @@ from app import db
 
 log = logging.getLogger(__name__)
 
+# Points awarded per goal of differential in a match-win event.
+# 0.5 means a 3-0 win is worth 1.5 pts, a 1-0 win 0.5 pts, etc.
+GOAL_DIFF_WEIGHT: float = 0.5
+
 # Stage-advancement bonus points. Consumed ONLY by /set_stage_reached.
 # Maps a user-facing stage keyword to (internal event_type, points).
 STAGE_REACH_EVENT: dict[str, tuple[str, int]] = {
@@ -69,16 +75,16 @@ def score_match_for_league(league_chat_id: int, match: dict) -> list[tuple[str, 
     if match["home_score"] is None or match["away_score"] is None:
         return []
 
-    awarded: list[tuple[str, str, int]] = []
+    awarded: list[tuple[str, str, float]] = []
     home = match["home_country"]
     away = match["away_country"]
     match_id = match["id"]
     diff = match["home_score"] - match["away_score"]
 
     if diff > 0:
-        _award_match_win(league_chat_id, home, diff, match_id, awarded)
+        _award_match_win(league_chat_id, home, diff * GOAL_DIFF_WEIGHT, match_id, awarded)
     elif diff < 0:
-        _award_match_win(league_chat_id, away, -diff, match_id, awarded)
+        _award_match_win(league_chat_id, away, -diff * GOAL_DIFF_WEIGHT, match_id, awarded)
     # diff == 0: draw — no one scores.
 
     return awarded
@@ -87,11 +93,12 @@ def score_match_for_league(league_chat_id: int, match: dict) -> list[tuple[str, 
 def _award_match_win(
     league_chat_id: int,
     country: str,
-    points: int,
+    points: float,
     match_id: int,
-    awarded: list[tuple[str, str, int]],
+    awarded: list[tuple[str, str, float]],
 ) -> None:
-    """Award goal-differential match points to `country`. Idempotent per match."""
+    """Award match-win points to `country`. Idempotent per match.
+    `points` has already been weighted (= goal_diff * GOAL_DIFF_WEIGHT)."""
     owner = db.owner_of_country(league_chat_id, country)
     if not owner:
         return  # nobody drafted this country in this league
@@ -99,7 +106,7 @@ def _award_match_win(
         return
     db.add_event(league_chat_id, owner["id"], country, "match_win", points, match_id)
     awarded.append(
-        (owner["display_name"], f"{country} match_win (+{points} goal diff)", points)
+        (owner["display_name"], f"{country} match_win", points)
     )
 
 

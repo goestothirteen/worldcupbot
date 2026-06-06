@@ -456,7 +456,7 @@ def points_for_country(chat_id: int, country_code: str) -> int:
 
 
 def all_leagues() -> list[dict]:
-    """Used by fetch_results.py to apply newly-finished matches to every league."""
+    """All currently-running leagues — used when applying a match result across chats."""
     with connect() as c, c.cursor() as cur:
         cur.execute("SELECT * FROM leagues WHERE status IN ('active', 'drafting')")
         return list(cur.fetchall())

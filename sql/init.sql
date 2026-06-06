@@ -189,7 +189,9 @@ CREATE TABLE IF NOT EXISTS point_events (
   country_code      VARCHAR(64) NOT NULL,
 
   event_type        VARCHAR(32) NOT NULL,
-  points            SMALLINT NOT NULL,
+  -- DECIMAL(4,1) supports fractional points (half-point goal-diff scoring).
+  -- Range -999.9..999.9 — way more than any plausible tournament total.
+  points            DECIMAL(4,1) NOT NULL,
 
   -- For group_win events, the specific match that triggered it.
   -- For one-time stage events, the first match in that stage that the
