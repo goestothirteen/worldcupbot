@@ -503,6 +503,56 @@ async def cmd_standings(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+def _is_int(s: str) -> bool:
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _parse_result_args(args: list[str]) -> Optional[tuple[str, str, str, str]]:
+    """
+    Split /set_result args into (home, home_score, away, away_score),
+    allowing multi-word country names ("south africa", "new zealand", ...).
+    Telegram splits on spaces, so we re-join: everything before the first
+    integer token is the home team, the last token is the away score, and
+    whatever sits between the two scores is the away team.
+      ["south", "africa", "2", "mexico", "0"]
+        → ("south africa", "2", "mexico", "0")
+    Returns None if the args don't fit that shape.
+    """
+    if len(args) < 4 or not _is_int(args[-1]):
+        return None
+    first_int = next((i for i, a in enumerate(args) if _is_int(a)), None)
+    # Need ≥1 home token before the score and ≥1 away token between scores.
+    if first_int is None or first_int == 0 or first_int >= len(args) - 1:
+        return None
+    away = " ".join(args[first_int + 1 : -1])
+    if not away:
+        return None
+    return " ".join(args[:first_int]), args[first_int], away, args[-1]
+
+
+def _resolve_country_tokens(tokens: list[str]):
+    """
+    Resolve a flat token list into countries, merging multi-word names
+    greedily (longest match first, up to 3 tokens). Returns (countries, None)
+    on success or (None, bad_token) on the first unresolvable token.
+    """
+    out, i = [], 0
+    while i < len(tokens):
+        for n in range(min(3, len(tokens) - i), 0, -1):
+            c = resolve(" ".join(tokens[i : i + n]))
+            if c:
+                out.append(c)
+                i += n
+                break
+        else:
+            return None, tokens[i]
+    return out, None
+
+
 async def cmd_set_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Usage: /set_result <home_country> <home_score> <away_country> <away_score>
@@ -515,16 +565,17 @@ async def cmd_set_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not await _is_league_admin(chat.id, user.id):
         await update.effective_message.reply_text("Admin-only command.")
         return
-    args = ctx.args
-    if len(args) < 4:
+    parsed = _parse_result_args(ctx.args)
+    if parsed is None:
         await update.effective_message.reply_text(
             "Usage: <code>/set_result &lt;home&gt; &lt;home_score&gt; &lt;away&gt; "
             "&lt;away_score&gt;</code>\n"
-            "Example: <code>/set_result england 3 ghana 0</code>",
+            "Examples: <code>/set_result england 3 ghana 0</code>, "
+            "<code>/set_result south africa 2 mexico 0</code>",
             parse_mode=ParseMode.HTML,
         )
         return
-    home_raw, home_score_raw, away_raw, away_score_raw = args[:4]
+    home_raw, home_score_raw, away_raw, away_score_raw = parsed
     home = resolve(home_raw)
     away = resolve(away_raw)
     if not home or not away:
@@ -622,16 +673,14 @@ async def cmd_set_stage_reached(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 
     # Resolve every country first — fail loudly if any are unknown so admin
     # doesn't half-apply a batch and have to figure out which ones landed.
-    resolved = []
-    for raw in country_args:
-        c = resolve(raw)
-        if not c:
-            await update.effective_message.reply_text(
-                f"Unknown country: <code>{_e(raw)}</code> — nothing was awarded.",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        resolved.append(c)
+    # Multi-word names ("south africa") are merged automatically.
+    resolved, bad = _resolve_country_tokens(country_args)
+    if resolved is None:
+        await update.effective_message.reply_text(
+            f"Unknown country: <code>{_e(bad)}</code> — nothing was awarded.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
 
     lines = [f"<b>Stage:</b> <code>{_e(stage)}</code>"]
     for c in resolved:
