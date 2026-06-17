@@ -147,7 +147,8 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "  <code>/order</code> — show draft order + whose turn it is\n"
         "  <code>/pick &lt;country&gt;</code> — draft a country on your turn\n"
         "  <code>/available</code> — list undrafted countries (grouped by FIFA group)\n"
-        "  <code>/undo_pick</code> — undo the most recent pick (admin)\n\n"
+        "  <code>/undo_pick</code> — undo the most recent pick (admin)\n"
+        "  <code>/end_draft</code> — end the draft early &amp; go active, even with teams left (admin)\n\n"
         "<b>Tournament:</b>\n"
         "  <code>/myteam</code> — your countries + points\n"
         "  <code>/team &lt;country&gt;</code> — owner + points for a country\n"
@@ -469,6 +470,43 @@ async def cmd_undo_pick(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(
         f"⏪ Undid pick {deleted['pick_number']}: {_display_country(deleted['country_code'])} "
         f"is back in the pool.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_end_draft(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: end the draft early (before all 48 teams are picked) and move the
+    league into its active phase. Any undrafted teams simply have no owner —
+    they accrue no points and can't be staked in duels. Match scoring and the
+    Team Duel mini-game open up once the league is active."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not await _is_league_admin(chat.id, user.id):
+        await update.effective_message.reply_text("Admin-only command.")
+        return
+    league = await asyncio.to_thread(db.get_league, chat.id)
+    if not league:
+        await update.effective_message.reply_text("No league here. Run /start_league first.")
+        return
+    if league["status"] != "drafting":
+        await update.effective_message.reply_text(
+            f"Nothing to end — the league is <b>{_e(league['status'])}</b>, not drafting.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    picks = await asyncio.to_thread(db.list_picks, chat.id)
+    n = len(picks)
+    remaining = 48 - n
+    await asyncio.to_thread(db.set_league_status, chat.id, "active")
+    tail = (
+        f" {remaining} team{'s' if remaining != 1 else ''} left undrafted (no owner)."
+        if remaining > 0 else ""
+    )
+    await update.effective_message.reply_text(
+        f"🏁 <b>Draft ended.</b> {n} of 48 teams drafted.{tail}\n"
+        f"The league is now <b>active</b> — match scoring and ⚔️ duels are open. "
+        f"See /standings and /help_duels.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1299,6 +1337,7 @@ def main() -> None:
     app.add_handler(CommandHandler("join", cmd_join))
     app.add_handler(CommandHandler("players", cmd_players))
     app.add_handler(CommandHandler("start_draft", cmd_start_draft))
+    app.add_handler(CommandHandler("end_draft", cmd_end_draft))
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("pick", cmd_pick))
     app.add_handler(CommandHandler("available", cmd_available))

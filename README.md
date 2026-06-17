@@ -78,6 +78,7 @@ Run in your group chat:
 | `/join` | anyone | Add yourself to the league |
 | `/players` | anyone | List signed-up players |
 | `/start_draft` | admin | Randomise draft order, begin drafting |
+| `/end_draft` | admin | End the draft early and go active, even with teams still undrafted |
 | `/order` | anyone | Show draft order + whose turn it is |
 | `/pick <country>` | on the clock | Draft a country (e.g. `/pick brazil`) |
 | `/available` | anyone | Undrafted countries, grouped by FIFA group |
