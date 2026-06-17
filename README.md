@@ -104,7 +104,7 @@ Setting up a duel is a **two-sided handshake**: the challenger stakes a team, th
 | `/confirm_duel` | challenger | Review both stakes and start the game |
 | `/decline_duel` | challenged player | Decline a pending challenge |
 | `/cancel_duel` | challenger / admin | Withdraw a pending duel (admin can also stop an active one) |
-| `/guess <letter>` | duelist | Hangman move. Correct letter keeps your turn; wrong passes it. Reveal the last letter to win; complete the gallows (6 wrong) and you lose. |
+| `/guess <letter>` | duelist | Hangman move. Correct letter keeps your turn; wrong passes it. Reveal the last letter to win both teams; if the gallows completes (6 wrong) with the word unsolved, it's a **draw** — no winner, no transfer. |
 | `/answer <text>` | duelist | Trivia answer. First to 3 correct (best of 5) wins. |
 | `/duel_status` | anyone | Show the current duel |
 | `/void_duel` | admin | Reverse the most recent completed duel, returning the seized team |

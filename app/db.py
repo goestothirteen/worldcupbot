@@ -570,13 +570,27 @@ def set_duel_status(duel_id: int, status: str) -> None:
         cur.execute("UPDATE duels SET status = %s WHERE id = %s", (status, duel_id))
 
 
+def draw_duel(duel_id: int, state_json: str) -> None:
+    """Close a duel with NO winner (e.g. hangman gallows completed without the
+    word being solved). No team transfers. winner_player_id stays NULL so it's
+    not picked up by /void_duel (there's nothing to reverse)."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE duels SET status = 'complete', winner_player_id = NULL, state = %s WHERE id = %s",
+            (state_json, duel_id),
+        )
+
+
 def last_completed_duel(chat_id: int) -> Optional[dict]:
-    """Most recently completed (not yet voided) duel — for admin /void_duel."""
+    """Most recently completed duel that actually transferred a team — for
+    admin /void_duel. Draws (winner_player_id IS NULL) are skipped: there's
+    nothing to undo."""
     with connect() as c, c.cursor() as cur:
         cur.execute(
             """
             SELECT * FROM duels
             WHERE league_chat_id = %s AND status = 'complete'
+                  AND winner_player_id IS NOT NULL
             ORDER BY id DESC LIMIT 1
             """,
             (chat_id,),

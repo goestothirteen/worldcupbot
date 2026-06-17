@@ -195,8 +195,9 @@ async def cmd_help_duels(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
         "  Guess a (long!) football word, turn by turn.\n"
         "  <code>/guess &lt;letter&gt;</code> — a correct letter keeps your turn; "
         "a wrong one passes it.\n"
-        "  Reveal the final letter to <b>win</b>; complete the gallows "
-        "(6 wrong) and you <b>lose</b>.\n\n"
+        "  Reveal the final letter to <b>win</b> both teams. If the gallows "
+        "completes (6 wrong) with the word unsolved, it's a <b>draw</b> — "
+        "nobody wins and both teams stay put.\n\n"
         "<b>🧠 Trivia mode</b>\n"
         "  Race to answer World Cup questions — first to 3 correct (best of 5) wins.\n"
         "  <code>/answer &lt;your answer&gt;</code> — either duelist can answer; "
@@ -1082,7 +1083,8 @@ async def cmd_confirm_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> N
             f"✅ Duel confirmed! {matchup}.\n"
             f"🪢 <b>Hangman</b> — guess the football word. "
             f"Correct letter keeps your turn; a wrong one passes it. "
-            f"Reveal the last letter to win; complete the gallows and you lose.\n\n"
+            f"Reveal the last letter to win; if the gallows completes (6 wrong) "
+            f"with the word unsolved, it's a draw and no one wins.\n\n"
         )
         await update.effective_message.reply_text(
             intro + _hangman_board(state, names), parse_mode=ParseMode.HTML
@@ -1189,12 +1191,22 @@ async def cmd_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "❌ Miss.\n\n" + _hangman_board(state, names),
             parse_mode=ParseMode.HTML,
         )
-    elif status in ("win", "lose"):
+    elif status == "win":
         word_line = f"The word was <b>{_e(state['word'])}</b>.\n\n"
         announce = await _finalize_duel(
             update, chat.id, d, state, result["winner"], result["loser"]
         )
         await update.effective_message.reply_text(word_line + announce, parse_mode=ParseMode.HTML)
+    elif status == "draw":
+        # Gallows complete, word unsolved — nobody wins, no team changes hands.
+        await asyncio.to_thread(db.draw_duel, d["id"], json.dumps(state))
+        await update.effective_message.reply_text(
+            f"{_hangman_board(state, names)}\n\n"
+            f"💀 The hangman's dead and the word was never cracked — "
+            f"it was <b>{_e(state['word'])}</b>.\n"
+            f"🤝 <b>It's a draw.</b> No one wins, both teams stay put.",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

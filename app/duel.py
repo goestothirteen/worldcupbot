@@ -117,10 +117,11 @@ def hangman_guess(state: dict, player_id: int, letter: str) -> dict:
       "repeat"     — that letter was already tried (state unchanged)
       "hit"        — correct letter, same player continues
       "miss"       — wrong letter, turn passes
-      "win"        — that guess completed the word; `winner` set
-      "lose"       — that wrong guess completed the gallows; `winner` (the
-                     OTHER player) set, `loser` = player_id
-    On terminal results the result dict also carries "winner" and "loser".
+      "win"        — that guess completed the word; `winner` + `loser` set
+      "draw"       — that wrong guess completed the gallows with the word still
+                     unsolved. Nobody wins, no team transfers.
+    On a "win" the result dict also carries "winner" and "loser". A "draw"
+    carries neither.
     """
     if player_id != state["turn"]:
         return {"status": "not_turn", "state": state}
@@ -143,8 +144,8 @@ def hangman_guess(state: dict, player_id: int, letter: str) -> dict:
     else:
         state["wrong"].append(up)
         if len(state["wrong"]) >= MAX_WRONG:
-            return {"status": "lose", "state": state,
-                    "winner": other_player(state, player_id), "loser": player_id}
+            # Gallows complete, word never solved → draw. No winner, no transfer.
+            return {"status": "draw", "state": state}
         # wrong → pass the turn
         state["turn"] = other_player(state, player_id)
         return {"status": "miss", "state": state}
