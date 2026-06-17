@@ -117,6 +117,28 @@ def get_player_by_user(chat_id: int, telegram_user_id: int) -> Optional[dict]:
         return cur.fetchone()
 
 
+def get_player_by_username(chat_id: int, username: str) -> Optional[dict]:
+    """Look up a player by @handle (case-insensitive, leading @ ignored).
+    Telegram usernames are unique and case-insensitive; we stored whatever
+    case the user had, so compare with LOWER() on both sides."""
+    username = username.lstrip("@")
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM players WHERE league_chat_id = %s AND LOWER(username) = LOWER(%s)",
+            (chat_id, username),
+        )
+        return cur.fetchone()
+
+
+def get_player_by_id(chat_id: int, player_id: int) -> Optional[dict]:
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM players WHERE league_chat_id = %s AND id = %s",
+            (chat_id, player_id),
+        )
+        return cur.fetchone()
+
+
 def assign_draft_order(chat_id: int, order: list[int]) -> None:
     """`order` is a list of player IDs in draft position 1..N."""
     with connect() as c, c.cursor() as cur:
@@ -463,3 +485,145 @@ def all_leagues() -> list[dict]:
     with connect() as c, c.cursor() as cur:
         cur.execute("SELECT * FROM leagues WHERE status IN ('active', 'drafting')")
         return list(cur.fetchall())
+
+
+# ── Duels ──────────────────────────────────────────────────────────────────
+#
+# A Team Duel: two players each stake one country they own; a mini-game decides
+# a winner; the loser's staked country (and its accrued points) transfers to the
+# winner. See app/duel.py for game logic and app/bot.py for the command flow.
+
+def get_open_duel(chat_id: int) -> Optional[dict]:
+    """The one non-terminal duel for this league (pending or active), or None.
+    The bot only ever allows a single open duel per chat, so this is unambiguous."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM duels
+            WHERE league_chat_id = %s AND status IN ('pending', 'active')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (chat_id,),
+        )
+        return cur.fetchone()
+
+
+def create_duel(chat_id: int, challenger_player_id: int, challenger_country: str,
+                opponent_player_id: int, mode: str) -> Optional[int]:
+    """Create a pending duel (opponent hasn't staked yet). Returns the new duel
+    id, or None if a duel is already open in this chat.
+
+    Race-safe: the duels.uniq_open_duel UNIQUE index permits only one open
+    (pending/active) duel per chat, so a concurrent second /duel that slips past
+    the application-level check fails the INSERT here and we return None."""
+    try:
+        with connect() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO duels
+                  (league_chat_id, challenger_player_id, challenger_country,
+                   opponent_player_id, mode, status)
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                """,
+                (chat_id, challenger_player_id, challenger_country,
+                 opponent_player_id, mode),
+            )
+            return cur.lastrowid
+    except pymysql.err.IntegrityError as e:
+        log.info("Duel rejected — one already open in chat %s: %s", chat_id, e)
+        return None
+
+
+def get_duel(duel_id: int) -> Optional[dict]:
+    with connect() as c, c.cursor() as cur:
+        cur.execute("SELECT * FROM duels WHERE id = %s", (duel_id,))
+        return cur.fetchone()
+
+
+def stake_opponent(duel_id: int, opponent_country: str) -> None:
+    """Opponent accepted and named their stake. Stays 'pending' — the game does
+    NOT start until the challenger confirms (two-sided handshake)."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE duels SET opponent_country = %s WHERE id = %s",
+            (opponent_country, duel_id),
+        )
+
+
+def activate_duel(duel_id: int, state_json: str) -> None:
+    """Challenger confirmed — flip pending → active and store the initial game
+    state. Both stakes are already recorded by this point."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE duels SET state = %s, status = 'active' WHERE id = %s",
+            (state_json, duel_id),
+        )
+
+
+def update_duel_state(duel_id: int, state_json: str) -> None:
+    with connect() as c, c.cursor() as cur:
+        cur.execute("UPDATE duels SET state = %s WHERE id = %s", (state_json, duel_id))
+
+
+def set_duel_status(duel_id: int, status: str) -> None:
+    with connect() as c, c.cursor() as cur:
+        cur.execute("UPDATE duels SET status = %s WHERE id = %s", (status, duel_id))
+
+
+def last_completed_duel(chat_id: int) -> Optional[dict]:
+    """Most recently completed (not yet voided) duel — for admin /void_duel."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM duels
+            WHERE league_chat_id = %s AND status = 'complete'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (chat_id,),
+        )
+        return cur.fetchone()
+
+
+def finish_duel_and_transfer(duel_id: int, chat_id: int, winner_player_id: int,
+                             loser_country: str, state_json: str) -> None:
+    """
+    Atomically: mark the duel complete with its winner, AND move the loser's
+    staked country (pick row + all its point_events) to the winner. Doing both
+    in one transaction means a crash can't leave the team half-transferred.
+
+    Why move point_events too: standings_detailed attributes a country's points
+    by matching (player_id, country_code). If we moved only the pick, the points
+    that team already banked would match neither owner and silently vanish from
+    the leaderboard. Future points follow automatically because scoring looks up
+    the current owner via owner_of_country at /set_result time.
+    """
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE duels SET status = 'complete', winner_player_id = %s, state = %s WHERE id = %s",
+            (winner_player_id, state_json, duel_id),
+        )
+        cur.execute(
+            "UPDATE picks SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (winner_player_id, chat_id, loser_country),
+        )
+        cur.execute(
+            "UPDATE point_events SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (winner_player_id, chat_id, loser_country),
+        )
+
+
+def void_duel_and_revert(duel_id: int, chat_id: int, loser_player_id: int,
+                         loser_country: str) -> None:
+    """Reverse a completed duel: give the loser's staked country (and its
+    point_events) back to them, and mark the duel voided."""
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE picks SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (loser_player_id, chat_id, loser_country),
+        )
+        cur.execute(
+            "UPDATE point_events SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (loser_player_id, chat_id, loser_country),
+        )
+        cur.execute("UPDATE duels SET status = 'voided' WHERE id = %s", (duel_id,))
+# end

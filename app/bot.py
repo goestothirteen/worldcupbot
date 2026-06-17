@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 import random
@@ -39,7 +40,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from app import db, draft, scoring
+from app import db, draft, duel, scoring
 from app.countries import COUNTRIES, BY_CODE, by_group, resolve
 
 load_dotenv()
@@ -160,7 +161,49 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "    e.g. <code>/set_stage_reached round_of_16 spain england germany</code>\n"
         "    stages: <code>round_of_32</code> +2, <code>round_of_16</code> +3, "
         "<code>quarter_final</code> +5, <code>semi_final</code> +8, "
-        "<code>final</code> +12, <code>champion</code> +20"
+        "<code>final</code> +12, <code>champion</code> +20\n\n"
+        "<b>⚔️ Bonus mini-game:</b> stake a team, play hangman or trivia, "
+        "winner takes both. See <code>/help_duels</code>."
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_help_duels(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dedicated help page for the Team Duel mini-game."""
+    text = (
+        "<b>⚔️ Team Duel</b> — a bonus side-game\n\n"
+        "Two players each stake one country they own and play a quick game. "
+        "The <b>winner takes both teams</b> — the loser's country (and every "
+        "point it's already banked, plus all future points) transfers to the "
+        "winner. Available once the draft is done and matches are underway. "
+        "Only one duel runs at a time per chat.\n\n"
+        "<b>Setting one up (a two-step handshake)</b>\n"
+        "  1. <code>/duel @rival &lt;hangman|trivia&gt; &lt;your_country&gt;</code> — "
+        "challenge &amp; stake your team\n"
+        "      e.g. <code>/duel @sam trivia brazil</code>\n"
+        "      (or <i>reply</i> to your rival's message and drop the @rival: "
+        "<code>/duel hangman brazil</code>)\n"
+        "  2. <code>/accept_duel &lt;your_country&gt;</code> — the challenged player "
+        "accepts and stakes their team\n"
+        "  3. <code>/confirm_duel</code> — the <b>challenger</b> sees both stakes and "
+        "confirms to start the game\n"
+        "  Either side can bail before it starts: <code>/decline_duel</code> "
+        "(challenged player) or <code>/cancel_duel</code> (challenger; admin can "
+        "also stop an active one).\n\n"
+        "<b>🪢 Hangman mode</b>\n"
+        "  Guess a (long!) football word, turn by turn.\n"
+        "  <code>/guess &lt;letter&gt;</code> — a correct letter keeps your turn; "
+        "a wrong one passes it.\n"
+        "  Reveal the final letter to <b>win</b>; complete the gallows "
+        "(6 wrong) and you <b>lose</b>.\n\n"
+        "<b>🧠 Trivia mode</b>\n"
+        "  Race to answer World Cup questions — first to 3 correct (best of 5) wins.\n"
+        "  <code>/answer &lt;your answer&gt;</code> — either duelist can answer; "
+        "fastest correct takes the question. Wrong answers cost nothing.\n\n"
+        "<b>Anytime</b>\n"
+        "  <code>/duel_status</code> — show the current duel\n"
+        "  <code>/void_duel</code> — admin reverses the most recent duel, "
+        "returning the seized team"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -702,6 +745,544 @@ async def cmd_set_stage_reached(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+# ── Team Duel ───────────────────────────────────────────────────────────────
+#
+# Two players each stake one country they own; a mini-game (hangman or trivia)
+# decides a winner; the loser's staked team transfers to the winner. State for
+# the in-progress game lives as JSON in duels.state — see app/duel.py. Only one
+# open (pending/active) duel per league at a time, so /guess and /answer never
+# have to disambiguate which duel they belong to.
+
+async def _duel_names(chat_id: int, d: dict) -> dict[int, str]:
+    """Map both duelists' player_id → display_name for rendering."""
+    ch = await asyncio.to_thread(db.get_player_by_id, chat_id, d["challenger_player_id"])
+    op = await asyncio.to_thread(db.get_player_by_id, chat_id, d["opponent_player_id"])
+    return {
+        d["challenger_player_id"]: ch["display_name"] if ch else "?",
+        d["opponent_player_id"]: op["display_name"] if op else "?",
+    }
+
+
+def _hangman_board(state: dict, names: dict[int, str]) -> str:
+    masked = duel.hangman_masked(state)
+    gallows = duel.hangman_gallows(len(state["wrong"]))
+    wrong = ", ".join(state["wrong"]) if state["wrong"] else "—"
+    turn_name = names.get(state["turn"], "?")
+    return (
+        f"<pre>{gallows}</pre>\n"
+        f"Word: <code>{masked}</code>\n"
+        f"Wrong ({len(state['wrong'])}/{duel.MAX_WRONG}): {_e(wrong)}\n"
+        f"👉 <b>{_e(turn_name)}</b>'s turn — <code>/guess &lt;letter&gt;</code>"
+    )
+
+
+def _trivia_question_text(state: dict, names: dict[int, str], prefix: str = "") -> str:
+    q = duel.trivia_current_question(state)
+    if q is None:
+        return prefix.strip()
+    qnum = state["current"] + 1
+    a, b = state["challenger_id"], state["opponent_id"]
+    score = (f"{_e(names[a])} {duel.trivia_score(state, a)} — "
+             f"{duel.trivia_score(state, b)} {_e(names[b])}")
+    return (
+        f"{prefix}<b>Q{qnum}</b> (first to {duel.WIN_SCORE} wins): {_e(q['q'])}\n"
+        f"Answer with <code>/answer &lt;your answer&gt;</code>\n"
+        f"<i>Score: {score}</i>"
+    )
+
+
+def _staked_country(d: dict, player_id: int) -> Optional[str]:
+    """The country a given duelist staked, or None."""
+    if player_id == d["challenger_player_id"]:
+        return d["challenger_country"]
+    if player_id == d["opponent_player_id"]:
+        return d["opponent_country"]
+    return None
+
+
+async def _finalize_duel(update: Update, chat_id: int, d: dict, state: dict,
+                         winner_id: int, loser_id: int) -> str:
+    """Transfer the loser's staked team to the winner and return an announcement."""
+    loser_country = _staked_country(d, loser_id)
+    names = await _duel_names(chat_id, d)
+    await asyncio.to_thread(
+        db.finish_duel_and_transfer, d["id"], chat_id, winner_id,
+        loser_country, json.dumps(state),
+    )
+    winner_country = _staked_country(d, winner_id)
+    return (
+        f"🏆 <b>{_e(names[winner_id])}</b> wins the duel!\n"
+        f"{_display_country(loser_country)} is seized from "
+        f"<b>{_e(names[loser_id])}</b> and joins "
+        f"<b>{_e(names[winner_id])}</b>'s squad alongside "
+        f"{_display_country(winner_country)}.\n"
+        f"<i>Use /myteam or /standings to see the updated rosters. "
+        f"Admin can reverse this with /void_duel.</i>"
+    )
+
+
+async def cmd_duel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Challenge another player to a Team Duel.
+      Reply to their message:  /duel <mode> <your_country>
+      Or @-mention them:       /duel @rival <mode> <your_country>
+    mode is 'hangman' or 'trivia'. You stake a country you own; they reply with
+    /accept_duel <their_country>.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    league = await asyncio.to_thread(db.get_league, chat.id)
+    if not league:
+        await update.effective_message.reply_text("No league here. Admin: /start_league.")
+        return
+    if league["status"] != "active":
+        await update.effective_message.reply_text(
+            f"Duels open once the draft is done and matches are underway "
+            f"(league is <b>{_e(league['status'])}</b>).",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    existing = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if existing:
+        await update.effective_message.reply_text(
+            "A duel is already in progress in this chat. Finish or /cancel_duel it first."
+        )
+        return
+
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me:
+        await update.effective_message.reply_text("You're not in this league. /join first.")
+        return
+
+    # Resolve opponent + mode + country from either the reply target or an @mention.
+    reply = update.effective_message.reply_to_message
+    args = list(ctx.args)
+    opponent = None
+    if reply and reply.from_user and not (args and args[0].startswith("@")):
+        opponent = await asyncio.to_thread(
+            db.get_player_by_user, chat.id, reply.from_user.id
+        )
+        if not opponent:
+            await update.effective_message.reply_text(
+                "That person isn't in the league."
+            )
+            return
+        mode_country = args
+    else:
+        if not args or not args[0].startswith("@"):
+            await update.effective_message.reply_text(
+                "Usage: reply to your rival with <code>/duel &lt;mode&gt; &lt;your_country&gt;</code>, "
+                "or <code>/duel @rival &lt;mode&gt; &lt;your_country&gt;</code>.\n"
+                "Modes: <code>hangman</code>, <code>trivia</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        opponent = await asyncio.to_thread(
+            db.get_player_by_username, chat.id, args[0]
+        )
+        if not opponent:
+            await update.effective_message.reply_text(
+                f"Couldn't find {_e(args[0])} in the league. They may have no @username set — "
+                f"try replying to one of their messages with /duel instead.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        mode_country = args[1:]
+
+    if opponent["id"] == me["id"]:
+        await update.effective_message.reply_text("You can't duel yourself. 🙂")
+        return
+    if not mode_country:
+        await update.effective_message.reply_text(
+            "Tell me the mode and the country you're staking: "
+            "<code>/duel … &lt;hangman|trivia&gt; &lt;your_country&gt;</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    mode = mode_country[0].lower()
+    if mode not in duel.MODES:
+        await update.effective_message.reply_text(
+            f"Unknown mode <code>{_e(mode_country[0])}</code>. "
+            f"Choose <code>hangman</code> or <code>trivia</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    country = resolve(" ".join(mode_country[1:]))
+    if not country:
+        await update.effective_message.reply_text(
+            "Don't recognize that country. Stake one you own — see /myteam."
+        )
+        return
+    owner = await asyncio.to_thread(db.owner_of_country, chat.id, country.code)
+    if not owner or owner["id"] != me["id"]:
+        await update.effective_message.reply_text(
+            f"You can only stake a country you own. {_display_country(country.code)} "
+            f"isn't yours — see /myteam.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    duel_id = await asyncio.to_thread(
+        db.create_duel, chat.id, me["id"], country.code, opponent["id"], mode
+    )
+    if duel_id is None:
+        # Lost a race to another /duel — the DB's one-open-duel-per-chat guard
+        # rejected this insert.
+        await update.effective_message.reply_text(
+            "Another duel just started in this chat — only one runs at a time. "
+            "Try again once it's finished."
+        )
+        return
+    await update.effective_message.reply_text(
+        f"⚔️ <b>{_e(me['display_name'])}</b> challenges "
+        f"<b>{_e(opponent['display_name'])}</b> to a <b>{_e(mode)}</b> duel, "
+        f"staking {_display_country(country.code)}!\n\n"
+        f"<b>{_e(opponent['display_name'])}</b> — accept by staking one of your teams: "
+        f"<code>/accept_duel &lt;your_country&gt;</code>, or <code>/decline_duel</code>.\n"
+        f"<i>Winner takes both teams.</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_accept_duel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Opponent accepts a challenge and names their stake. This does NOT start
+    the game — the challenger must /confirm_duel first (two-sided handshake)."""
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d or d["status"] != "pending":
+        await update.effective_message.reply_text("No pending duel to accept.")
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me or me["id"] != d["opponent_player_id"]:
+        await update.effective_message.reply_text(
+            "Only the challenged player can accept this duel."
+        )
+        return
+    if d["opponent_country"] is not None:
+        names = await _duel_names(chat.id, d)
+        await update.effective_message.reply_text(
+            f"You've already staked {_display_country(d['opponent_country'])}. "
+            f"Waiting on <b>{_e(names[d['challenger_player_id']])}</b> to "
+            f"<code>/confirm_duel</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if not ctx.args:
+        await update.effective_message.reply_text(
+            "Stake a team you own: <code>/accept_duel &lt;your_country&gt;</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    country = resolve(" ".join(ctx.args))
+    if not country:
+        await update.effective_message.reply_text("Don't recognize that country. See /myteam.")
+        return
+    owner = await asyncio.to_thread(db.owner_of_country, chat.id, country.code)
+    if not owner or owner["id"] != me["id"]:
+        await update.effective_message.reply_text(
+            f"You can only stake a country you own — {_display_country(country.code)} isn't yours.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if country.code == d["challenger_country"]:
+        # Can't happen (different owners) but guard anyway.
+        await update.effective_message.reply_text("Pick a different team from the one already staked.")
+        return
+
+    await asyncio.to_thread(db.stake_opponent, d["id"], country.code)
+    names = await _duel_names(chat.id, d)
+    challenger_name = names[d["challenger_player_id"]]
+    await update.effective_message.reply_text(
+        f"🤝 <b>{_e(me['display_name'])}</b> accepts, staking "
+        f"{_display_country(country.code)}!\n\n"
+        f"<b>Stakes:</b> {_display_country(d['challenger_country'])} "
+        f"(<b>{_e(challenger_name)}</b>) vs {_display_country(country.code)} "
+        f"(<b>{_e(me['display_name'])}</b>)\n\n"
+        f"<b>{_e(challenger_name)}</b> — you challenged, so you get the final say. "
+        f"<code>/confirm_duel</code> to start the <b>{_e(d['mode'])}</b> game, "
+        f"or <code>/cancel_duel</code> to back out.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_confirm_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Challenger confirms the matchup after the opponent has staked — this is
+    what actually starts the game."""
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d or d["status"] != "pending" or d["opponent_country"] is None:
+        await update.effective_message.reply_text(
+            "Nothing to confirm — the challenged player needs to /accept_duel "
+            "and stake a team first."
+        )
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me or me["id"] != d["challenger_player_id"]:
+        names = await _duel_names(chat.id, d)
+        await update.effective_message.reply_text(
+            f"Only <b>{_e(names[d['challenger_player_id']])}</b> (who issued the "
+            f"challenge) can confirm.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    names = await _duel_names(chat.id, d)
+    ch_id, op_id = d["challenger_player_id"], d["opponent_player_id"]
+    matchup = (
+        f"{_display_country(d['challenger_country'])} vs "
+        f"{_display_country(d['opponent_country'])}"
+    )
+    if d["mode"] == "hangman":
+        state = duel.new_hangman_state(ch_id, op_id)
+        await asyncio.to_thread(db.activate_duel, d["id"], json.dumps(state))
+        intro = (
+            f"✅ Duel confirmed! {matchup}.\n"
+            f"🪢 <b>Hangman</b> — guess the football word. "
+            f"Correct letter keeps your turn; a wrong one passes it. "
+            f"Reveal the last letter to win; complete the gallows and you lose.\n\n"
+        )
+        await update.effective_message.reply_text(
+            intro + _hangman_board(state, names), parse_mode=ParseMode.HTML
+        )
+    else:  # trivia
+        state = duel.new_trivia_state(ch_id, op_id)
+        await asyncio.to_thread(db.activate_duel, d["id"], json.dumps(state))
+        intro = (
+            f"✅ Duel confirmed! {matchup}.\n"
+            f"🧠 <b>Trivia</b> — first to {duel.WIN_SCORE} correct wins. "
+            f"Either player answers; fastest correct takes the question.\n\n"
+        )
+        await update.effective_message.reply_text(
+            intro + _trivia_question_text(state, names), parse_mode=ParseMode.HTML
+        )
+
+
+async def cmd_decline_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d or d["status"] != "pending":
+        await update.effective_message.reply_text("No pending duel to decline.")
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me or me["id"] != d["opponent_player_id"]:
+        await update.effective_message.reply_text("Only the challenged player can decline.")
+        return
+    await asyncio.to_thread(db.set_duel_status, d["id"], "cancelled")
+    await update.effective_message.reply_text("🚫 Duel declined.")
+
+
+async def cmd_cancel_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Challenger withdraws a still-pending duel. Admin can cancel an active one."""
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d:
+        await update.effective_message.reply_text("No duel in progress.")
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    is_challenger = bool(me and me["id"] == d["challenger_player_id"])
+    is_admin = await _is_league_admin(chat.id, user.id)
+    if d["status"] == "pending" and not (is_challenger or is_admin):
+        await update.effective_message.reply_text("Only the challenger (or an admin) can cancel.")
+        return
+    if d["status"] == "active" and not is_admin:
+        await update.effective_message.reply_text(
+            "The duel's already underway — only an admin can cancel it now."
+        )
+        return
+    await asyncio.to_thread(db.set_duel_status, d["id"], "cancelled")
+    await update.effective_message.reply_text("🚫 Duel cancelled. No teams changed hands.")
+
+
+async def cmd_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d or d["status"] != "active":
+        await update.effective_message.reply_text("No active duel to guess in.")
+        return
+    if d["mode"] != "hangman":
+        await update.effective_message.reply_text("This duel is trivia — use /answer.")
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me or me["id"] not in (d["challenger_player_id"], d["opponent_player_id"]):
+        await update.effective_message.reply_text("You're not in this duel.")
+        return
+    if not ctx.args:
+        await update.effective_message.reply_text(
+            "Guess a letter: <code>/guess a</code>.", parse_mode=ParseMode.HTML
+        )
+        return
+
+    state = json.loads(d["state"])
+    names = await _duel_names(chat.id, d)
+    result = duel.hangman_guess(state, me["id"], ctx.args[0])
+    status = result["status"]
+
+    if status == "not_turn":
+        await update.effective_message.reply_text(
+            f"⏳ Not your turn — waiting on <b>{_e(names[state['turn']])}</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if status == "invalid":
+        await update.effective_message.reply_text("Guess a single letter A–Z.")
+        return
+    if status == "repeat":
+        await update.effective_message.reply_text("That letter's already been tried.")
+        return
+
+    # State changed — persist it.
+    await asyncio.to_thread(db.update_duel_state, d["id"], json.dumps(state))
+
+    if status == "hit":
+        await update.effective_message.reply_text(
+            "✅ Hit! Keep going.\n\n" + _hangman_board(state, names),
+            parse_mode=ParseMode.HTML,
+        )
+    elif status == "miss":
+        await update.effective_message.reply_text(
+            "❌ Miss.\n\n" + _hangman_board(state, names),
+            parse_mode=ParseMode.HTML,
+        )
+    elif status in ("win", "lose"):
+        word_line = f"The word was <b>{_e(state['word'])}</b>.\n\n"
+        announce = await _finalize_duel(
+            update, chat.id, d, state, result["winner"], result["loser"]
+        )
+        await update.effective_message.reply_text(word_line + announce, parse_mode=ParseMode.HTML)
+
+
+async def cmd_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d or d["status"] != "active":
+        await update.effective_message.reply_text("No active duel to answer in.")
+        return
+    if d["mode"] != "trivia":
+        await update.effective_message.reply_text("This duel is hangman — use /guess.")
+        return
+    me = await asyncio.to_thread(db.get_player_by_user, chat.id, user.id)
+    if not me or me["id"] not in (d["challenger_player_id"], d["opponent_player_id"]):
+        await update.effective_message.reply_text("You're not in this duel.")
+        return
+    if not ctx.args:
+        await update.effective_message.reply_text(
+            "Answer the question: <code>/answer &lt;your answer&gt;</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    state = json.loads(d["state"])
+    names = await _duel_names(chat.id, d)
+    result = duel.trivia_answer(state, me["id"], " ".join(ctx.args))
+    status = result["status"]
+
+    if status == "over":
+        await update.effective_message.reply_text("That question's already settled.")
+        return
+    if status == "wrong":
+        await update.effective_message.reply_text(
+            f"❌ <b>{_e(me['display_name'])}</b>: not it — keep trying!",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await asyncio.to_thread(db.update_duel_state, d["id"], json.dumps(state))
+
+    if status == "correct":
+        prefix = (
+            f"✅ <b>{_e(me['display_name'])}</b> nails it — "
+            f"the answer was <b>{_e(result['canonical'])}</b>!\n\n"
+        )
+        await update.effective_message.reply_text(
+            _trivia_question_text(state, names, prefix), parse_mode=ParseMode.HTML
+        )
+    elif status == "win":
+        head = (
+            f"✅ <b>{_e(me['display_name'])}</b> — the answer was "
+            f"<b>{_e(result['canonical'])}</b>!\n"
+        )
+        announce = await _finalize_duel(
+            update, chat.id, d, state, result["winner"], result["loser"]
+        )
+        await update.effective_message.reply_text(head + "\n" + announce, parse_mode=ParseMode.HTML)
+
+
+async def cmd_duel_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    d = await asyncio.to_thread(db.get_open_duel, chat.id)
+    if not d:
+        await update.effective_message.reply_text("No duel in progress. Start one with /duel.")
+        return
+    names = await _duel_names(chat.id, d)
+    ch, op = d["challenger_player_id"], d["opponent_player_id"]
+    if d["status"] == "pending":
+        if d["opponent_country"] is None:
+            # Awaiting the opponent's acceptance + stake.
+            await update.effective_message.reply_text(
+                f"⚔️ <b>{_e(names[ch])}</b> ({_display_country(d['challenger_country'])}) "
+                f"challenged <b>{_e(names[op])}</b> to a <b>{_e(d['mode'])}</b> duel.\n"
+                f"Waiting on <b>{_e(names[op])}</b> to <code>/accept_duel</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            # Both staked — awaiting the challenger's confirmation.
+            await update.effective_message.reply_text(
+                f"⚔️ <b>{_e(d['mode'])}</b> duel — both teams staked:\n"
+                f"{_display_country(d['challenger_country'])} (<b>{_e(names[ch])}</b>) "
+                f"vs {_display_country(d['opponent_country'])} (<b>{_e(names[op])}</b>)\n"
+                f"Waiting on <b>{_e(names[ch])}</b> to <code>/confirm_duel</code> "
+                f"(or <code>/cancel_duel</code>).",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+    state = json.loads(d["state"])
+    if d["mode"] == "hangman":
+        await update.effective_message.reply_text(
+            f"🪢 <b>Hangman duel</b> in progress:\n\n" + _hangman_board(state, names),
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"🧠 <b>Trivia duel</b> in progress:\n\n" + _trivia_question_text(state, names),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def cmd_void_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: reverse the most recent completed duel, returning the seized team."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not await _is_league_admin(chat.id, user.id):
+        await update.effective_message.reply_text("Admin-only command.")
+        return
+    d = await asyncio.to_thread(db.last_completed_duel, chat.id)
+    if not d:
+        await update.effective_message.reply_text("No completed duel to void.")
+        return
+    winner_id = d["winner_player_id"]
+    loser_id = (d["opponent_player_id"] if winner_id == d["challenger_player_id"]
+                else d["challenger_player_id"])
+    loser_country = _staked_country(d, loser_id)
+    names = await _duel_names(chat.id, d)
+    await asyncio.to_thread(
+        db.void_duel_and_revert, d["id"], chat.id, loser_id, loser_country
+    )
+    await update.effective_message.reply_text(
+        f"↩️ Voided the last duel. {_display_country(loser_country)} returns to "
+        f"<b>{_e(names[loser_id])}</b>.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -713,6 +1294,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))
+    app.add_handler(CommandHandler("help_duels", cmd_help_duels))
     app.add_handler(CommandHandler("start_league", cmd_start_league))
     app.add_handler(CommandHandler("join", cmd_join))
     app.add_handler(CommandHandler("players", cmd_players))
@@ -727,6 +1309,17 @@ def main() -> None:
     app.add_handler(CommandHandler("set_result", cmd_set_result))
     app.add_handler(CommandHandler("undo_result", cmd_undo_result))
     app.add_handler(CommandHandler("set_stage_reached", cmd_set_stage_reached))
+
+    # Team Duel mini-game
+    app.add_handler(CommandHandler("duel", cmd_duel))
+    app.add_handler(CommandHandler("accept_duel", cmd_accept_duel))
+    app.add_handler(CommandHandler("confirm_duel", cmd_confirm_duel))
+    app.add_handler(CommandHandler("decline_duel", cmd_decline_duel))
+    app.add_handler(CommandHandler("cancel_duel", cmd_cancel_duel))
+    app.add_handler(CommandHandler("guess", cmd_guess))
+    app.add_handler(CommandHandler("answer", cmd_answer))
+    app.add_handler(CommandHandler("duel_status", cmd_duel_status))
+    app.add_handler(CommandHandler("void_duel", cmd_void_duel))
 
     # Heartbeat job — every 60s, touch the file the healthcheck watches.
     if app.job_queue is not None:

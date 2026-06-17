@@ -90,6 +90,36 @@ Run in your group chat:
 | `/set_stage_reached <stage> <country> [more...]` | admin | Award stage bonus to one or more countries |
 | `/help` | anyone | Full command list |
 
+### ⚔️ Team Duel (bonus mini-game)
+
+Two players each stake a country they own and play a quick game; the **winner takes both teams** (the loser's country — and every point it has banked or will bank — transfers to the winner). Available once the draft is done and the league is `active`. **Only one duel can run in a chat at a time** — enforced at the database level, so a second concurrent challenge is rejected, not raced.
+
+Setting up a duel is a **two-sided handshake**: the challenger stakes a team, the challenged player accepts and stakes theirs, and then the challenger sees both stakes and confirms before the game begins. Either side can back out before that confirmation.
+
+| Command | Who | What |
+|---|---|---|
+| `/duel @rival <hangman\|trivia> <your_country>` | anyone | Challenge a player and stake a team. You can also *reply* to their message and drop the `@rival`. |
+| `/accept_duel <your_country>` | challenged player | Accept the challenge, staking one of your teams. **Does not start the game** — waits for the challenger to confirm. |
+| `/confirm_duel` | challenger | Review both stakes and start the game |
+| `/decline_duel` | challenged player | Decline a pending challenge |
+| `/cancel_duel` | challenger / admin | Withdraw a pending duel (admin can also stop an active one) |
+| `/guess <letter>` | duelist | Hangman move. Correct letter keeps your turn; wrong passes it. Reveal the last letter to win; complete the gallows (6 wrong) and you lose. |
+| `/answer <text>` | duelist | Trivia answer. First to 3 correct (best of 5) wins. |
+| `/duel_status` | anyone | Show the current duel |
+| `/void_duel` | admin | Reverse the most recent completed duel, returning the seized team |
+| `/help_duels` | anyone | Dedicated help page for the duel mini-game |
+
+The two game modes are **hangman** (guess a long football word, turn-based, more skill) and **trivia** (race to answer World Cup questions). The challenger picks the mode. Word and question banks live in `app/duel_banks.py` — add more freely. Full in-chat help lives at `/help_duels` (kept off the main `/help` to keep it uncluttered).
+
+> **DB safety note:** the duel feature is purely **additive** and does **not** alter your existing data.
+> - It adds one new `duels` table and nothing else. It never modifies the `leagues`, `players`, `picks`, `matches`, or `point_events` table definitions.
+> - The only code that ever writes to existing tables is the team transfer, which runs **only when a duel is explicitly finished** (and only for the two staked countries). Deploying the code or running the migration changes no existing rows.
+> - Fresh installs get the `duels` table automatically from `sql/init.sql`. For a league whose database **already exists** (your live tournament), run the one-off migration once:
+>   ```
+>   docker compose exec worldcup_bot python -m app.migrate_duels
+>   ```
+>   It executes a single `CREATE TABLE IF NOT EXISTS duels` — idempotent, additive, and safe to run while the tournament is live. It contains no `ALTER`, `DROP`, `INSERT`, or `UPDATE` against existing tables.
+
 "Admin" = whoever ran `/start_league` for that chat, OR any user ID listed in `ADMIN_USER_IDS` in `.env`.
 
 Country names accept aliases: `/pick usa`, `/pick korea`, `/pick turkey`, `/pick ivory coast`, `/pick dr congo` all work. Use `/available` if you're unsure.
