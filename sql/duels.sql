@@ -63,9 +63,11 @@ CREATE TABLE IF NOT EXISTS duels (
   updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                         ON UPDATE CURRENT_TIMESTAMP,
 
-  FOREIGN KEY (league_chat_id)
-    REFERENCES leagues(chat_id)
-    ON DELETE CASCADE,
+  -- NOTE: no FK on league_chat_id. InnoDB forbids a cascading foreign key on a
+  -- column that is the base of an INDEXED stored generated column, and
+  -- open_chat_id (UNIQUE) is generated from league_chat_id. Deleting a league
+  -- still cleans up its duels transitively: leagues -> players (CASCADE) ->
+  -- duels (CASCADE via the player FKs below).
   FOREIGN KEY (challenger_player_id)
     REFERENCES players(id)
     ON DELETE CASCADE,
