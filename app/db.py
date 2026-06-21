@@ -598,6 +598,30 @@ def last_completed_duel(chat_id: int) -> Optional[dict]:
         return cur.fetchone()
 
 
+def transfer_team(chat_id: int, country_code: str, new_player_id: int) -> None:
+    """
+    Manually move a country (its pick row + all its accrued point_events) to
+    a new owner. Used by the /transfer_team admin command to settle bets made
+    outside Telegram — the same ownership move a duel does, minus any game.
+
+    Like finish_duel_and_transfer, both updates run in one transaction so a
+    crash can't leave the team half-transferred, and point_events move with the
+    pick so already-banked points follow the country (standings_detailed
+    attributes points by (player_id, country_code); leaving point_events behind
+    would orphan them off the leaderboard). Future points follow automatically
+    because scoring resolves the current owner via owner_of_country.
+    """
+    with connect() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE picks SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (new_player_id, chat_id, country_code),
+        )
+        cur.execute(
+            "UPDATE point_events SET player_id = %s WHERE league_chat_id = %s AND country_code = %s",
+            (new_player_id, chat_id, country_code),
+        )
+
+
 def finish_duel_and_transfer(duel_id: int, chat_id: int, winner_player_id: int,
                              loser_country: str, state_json: str) -> None:
     """

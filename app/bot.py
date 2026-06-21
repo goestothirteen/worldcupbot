@@ -163,6 +163,9 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "    stages: <code>round_of_32</code> +2, <code>round_of_16</code> +3, "
         "<code>quarter_final</code> +5, <code>semi_final</code> +8, "
         "<code>final</code> +12, <code>champion</code> +20\n\n"
+        "<b>Admin — manual team transfer</b> (for bets settled outside Telegram):\n"
+        "  <code>/transfer_team &lt;country&gt; @recipient</code> "
+        "(or reply to them) — hand a team and its points to another player.\n\n"
         "<b>⚔️ Bonus mini-game:</b> stake a team, play hangman or trivia, "
         "winner takes both. See <code>/help_duels</code>."
     )
@@ -1333,6 +1336,81 @@ async def cmd_void_duel(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_transfer_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Admin: manually hand a country (and its banked points) to another player.
+    Used to settle bets made outside Telegram.
+      Reply to the recipient:  /transfer_team <country>
+      Or @-mention them:       /transfer_team <country> @recipient
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if not await _is_league_admin(chat.id, user.id):
+        await update.effective_message.reply_text("Admin-only command.")
+        return
+
+    usage = (
+        "Usage: reply to the recipient with <code>/transfer_team &lt;country&gt;</code>, "
+        "or <code>/transfer_team &lt;country&gt; @recipient</code>."
+    )
+    args = list(ctx.args)
+    reply = update.effective_message.reply_to_message
+
+    # Resolve the recipient: trailing @mention takes priority, else the reply target.
+    recipient = None
+    if args and args[-1].startswith("@"):
+        recipient = await asyncio.to_thread(db.get_player_by_username, chat.id, args[-1])
+        if not recipient:
+            await update.effective_message.reply_text(
+                f"Couldn't find {_e(args[-1])} in the league. They may have no @username set — "
+                f"try replying to one of their messages instead.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        country_tokens = args[:-1]
+    elif reply and reply.from_user:
+        recipient = await asyncio.to_thread(db.get_player_by_user, chat.id, reply.from_user.id)
+        if not recipient:
+            await update.effective_message.reply_text("That person isn't in the league.")
+            return
+        country_tokens = args
+    else:
+        await update.effective_message.reply_text(usage, parse_mode=ParseMode.HTML)
+        return
+
+    if not country_tokens:
+        await update.effective_message.reply_text(usage, parse_mode=ParseMode.HTML)
+        return
+
+    country = resolve(" ".join(country_tokens))
+    if not country:
+        await update.effective_message.reply_text("Don't recognize that country.")
+        return
+
+    owner = await asyncio.to_thread(db.owner_of_country, chat.id, country.code)
+    if not owner:
+        await update.effective_message.reply_text(
+            f"{_display_country(country.code)} is undrafted — nothing to transfer.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if owner["id"] == recipient["id"]:
+        await update.effective_message.reply_text(
+            f"{_display_country(country.code)} is already owned by "
+            f"<b>{_e(recipient['display_name'])}</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await asyncio.to_thread(db.transfer_team, chat.id, country.code, recipient["id"])
+    await update.effective_message.reply_text(
+        f"🔁 Transferred {_display_country(country.code)} from "
+        f"<b>{_e(owner['display_name'])}</b> to <b>{_e(recipient['display_name'])}</b> "
+        f"(points moved too).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1360,6 +1438,7 @@ def main() -> None:
     app.add_handler(CommandHandler("set_result", cmd_set_result))
     app.add_handler(CommandHandler("undo_result", cmd_undo_result))
     app.add_handler(CommandHandler("set_stage_reached", cmd_set_stage_reached))
+    app.add_handler(CommandHandler("transfer_team", cmd_transfer_team))
 
     # Team Duel mini-game
     app.add_handler(CommandHandler("duel", cmd_duel))
