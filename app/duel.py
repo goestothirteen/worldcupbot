@@ -84,13 +84,27 @@ def new_hangman_state(challenger_id: int, opponent_id: int,
 
 
 def hangman_masked(state: dict) -> str:
-    """Render the word with unrevealed letters as '_', spaced for readability."""
+    """Render the answer with unrevealed letters as '_', spaced for readability.
+    The answer may be a multi-word phrase: spaces are shown as '/' word breaks
+    (they're never guessed), and any other non-letter is shown literally."""
     revealed = set(state["revealed"])
-    return " ".join(ch if ch in revealed else "_" for ch in state["word"])
+    out = []
+    for ch in state["word"]:
+        if "A" <= ch <= "Z":
+            out.append(ch if ch in revealed else "_")
+        elif ch == " ":
+            out.append("/")
+        else:
+            out.append(ch)
+    return " ".join(out)
 
 
 def hangman_is_solved(state: dict) -> bool:
-    return all(ch in set(state["revealed"]) for ch in state["word"])
+    """Solved once every LETTER is revealed. Spaces (and any non-letter) are
+    free — players only guess A-Z, so a phrase could never be solved if we
+    required its spaces to be 'revealed' too."""
+    revealed = set(state["revealed"])
+    return all(ch in revealed for ch in state["word"] if "A" <= ch <= "Z")
 
 
 def hangman_gallows(wrong_count: int) -> str:

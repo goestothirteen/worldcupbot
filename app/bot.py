@@ -812,7 +812,7 @@ def _hangman_board(state: dict, names: dict[int, str]) -> str:
     turn_name = names.get(state["turn"], "?")
     return (
         f"<pre>{gallows}</pre>\n"
-        f"Word: <code>{masked}</code>\n"
+        f"Answer (/ = new word): <code>{masked}</code>\n"
         f"Wrong ({len(state['wrong'])}/{duel.MAX_WRONG}): {_e(wrong)}\n"
         f"👉 <b>{_e(turn_name)}</b>'s turn — <code>/guess &lt;letter&gt;</code>"
     )

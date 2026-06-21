@@ -6,9 +6,12 @@ and so adding more words / questions is a one-file edit with no risk of
 touching the state machines.
 
 HANGMAN_WORDS
-  Football-themed words, UPPERCASE, A-Z only (no spaces, digits or accents).
-  Deliberately long/compound for a real challenge — duel.py asserts the shape
-  at import time, and _validate() below also enforces a minimum length.
+  Football-themed answers, UPPERCASE, letters A-Z plus single spaces between
+  words (no digits or accents — strip accents when adding, e.g. BERNABEU).
+  Entries can now be PHRASES (legendary players, clubs, stadiums, managers,
+  iconic moments, tactics, competitions) as well as single words, for a
+  broader and harder game. Spaces are revealed for free; players only guess
+  letters. _validate() below enforces the shape and a minimum letter count.
 
 TRIVIA
   A list of {"q": <question>, "answers": [<accepted answer>, ...]}.
@@ -21,27 +24,49 @@ TRIVIA
 
 from __future__ import annotations
 
-MIN_WORD_LEN = 8  # keep hangman challenging
+MIN_WORD_LETTERS = 5  # minimum count of A-Z letters (spaces don't count)
 
 # ── Hangman ────────────────────────────────────────────────────────────────
-# Long and compound football vocabulary. All >= MIN_WORD_LEN letters.
+# Broad, harder football content: single words AND multi-word phrases.
+# Mix of vocabulary, legendary players, managers, clubs, stadiums, iconic
+# moments, tactics and competitions. Letters A-Z + single spaces only;
+# strip accents (BERNABEU, MBAPPE, SELECAO). All have >= MIN_WORD_LETTERS letters.
 
 HANGMAN_WORDS: list[str] = [
-    "GOALKEEPER", "MIDFIELDER", "DEFENDER", "ATTACKER", "PLAYMAKER",
-    "SUBSTITUTE", "SUBSTITUTION", "TOURNAMENT", "QUARTERFINAL", "SEMIFINAL",
-    "GOALSCORER", "EQUALISER", "COUNTERATTACK", "POSSESSION", "FORMATION",
-    "CENTREBACK", "FULLBACK", "WINGBACK", "STOPPAGE", "INJURYTIME",
-    "EXTRATIME", "PENALTYBOX", "FREEKICK", "CORNERKICK", "HANDBALL",
-    "CLEARANCE", "INTERCEPTION", "DEFLECTION", "CROSSBAR", "GOALPOST",
-    "GOALLINE", "HALFTIME", "LINESMAN", "DRIBBLING", "TACKLING",
-    "PRESSING", "HATTRICK", "KNOCKOUT", "CHAMPION", "CHAMPIONS",
-    "QUALIFIER", "QUALIFICATION", "GROUPSTAGE", "AGGREGATE", "SHOOTOUT",
-    "GOLDENBOOT", "GOLDENBALL", "GOLDENGLOVE", "WORLDCUP", "NATIONALTEAM",
-    "INTERNATIONAL", "ATTACKING", "DEFENDING", "SUPPORTERS", "CELEBRATION",
-    "DISALLOWED", "ADVANTAGE", "STALEMATE", "BREAKAWAY", "OVERLAPPING",
-    "VOLLEYED", "DEFENSIVE", "OFFENSIVE", "TECHNICAL", "TACTICAL",
-    "SCISSORKICK", "BICYCLEKICK", "LONGRANGE", "THROUGHBALL", "MANAGERIAL",
-    "RELEGATION", "CONSOLATION", "GROUNDSMAN", "TURNAROUND", "SUPERSUB",
+    # — vocabulary / concepts —
+    "OFFSIDE", "NUTMEG", "VOLLEY", "BACKHEEL", "PANENKA", "RABONA",
+    "CATENACCIO", "GEGENPRESSING", "POSSESSION", "COUNTERATTACK",
+    "GROUP OF DEATH", "PENALTY SHOOTOUT", "STOPPAGE TIME", "EXTRA TIME",
+    "CLEAN SHEET", "FALSE NINE", "SWEEPER KEEPER", "TARGET MAN",
+    "PARK THE BUS", "GOLDEN GOAL", "BICYCLE KICK", "SCORPION KICK",
+    "THROUGH BALL", "INJURY TIME", "AWAY GOALS", "SET PIECE",
+    # — iconic moments / phrases —
+    "HAND OF GOD", "GOAL OF THE CENTURY", "TOTAL FOOTBALL", "TIKI TAKA",
+    "GOLDEN GENERATION", "THE GAFFER", "DERBY DAY",
+    # — legendary players —
+    "DIEGO MARADONA", "LIONEL MESSI", "CRISTIANO RONALDO", "ZINEDINE ZIDANE",
+    "JOHAN CRUYFF", "FRANZ BECKENBAUER", "ROBERTO BAGGIO", "PAOLO MALDINI",
+    "THIERRY HENRY", "ANDREA PIRLO", "LUKA MODRIC", "KYLIAN MBAPPE",
+    "ERLING HAALAND", "GEORGE BEST", "MICHEL PLATINI", "RONALDINHO",
+    "GIANLUIGI BUFFON", "MIROSLAV KLOSE", "JUST FONTAINE", "GARRINCHA",
+    "BOBBY MOORE", "GORDON BANKS", "OLIVER KAHN", "ANDRES INIESTA",
+    "XAVI HERNANDEZ", "DIDIER DROGBA", "SERGIO RAMOS", "IKER CASILLAS",
+    # — managers —
+    "PEP GUARDIOLA", "JOSE MOURINHO", "ALEX FERGUSON", "ARSENE WENGER",
+    "CARLO ANCELOTTI", "DIDIER DESCHAMPS", "JURGEN KLOPP", "MARCELO BIELSA",
+    "RINUS MICHELS",
+    # — clubs —
+    "MANCHESTER UNITED", "REAL MADRID", "BAYERN MUNICH", "INTER MILAN",
+    "BORUSSIA DORTMUND", "BOCA JUNIORS", "RIVER PLATE", "AJAX AMSTERDAM",
+    # — stadiums —
+    "MARACANA STADIUM", "WEMBLEY STADIUM", "SANTIAGO BERNABEU",
+    "OLD TRAFFORD", "CAMP NOU", "SAN SIRO", "AZTECA STADIUM", "ANFIELD",
+    # — competitions / trophies —
+    "WORLD CUP FINAL", "CHAMPIONS LEAGUE", "COPA AMERICA", "BALLON DOR",
+    "GOLDEN BOOT", "GOLDEN BALL", "EUROPEAN CHAMPIONSHIP", "GROUP STAGE",
+    # — national-team nicknames —
+    "THE THREE LIONS", "LES BLEUS", "THE AZZURRI", "DIE MANNSCHAFT",
+    "LA ROJA", "THE SELECAO", "THE SUPER EAGLES",
 ]
 
 # ── Trivia ─────────────────────────────────────────────────────────────────
@@ -121,9 +146,17 @@ TRIVIA: list[dict] = [
 
 
 def _validate() -> None:
+    seen_words = set()
     for w in HANGMAN_WORDS:
-        assert w.isalpha() and w.isupper(), f"bad hangman word: {w!r}"
-        assert len(w) >= MIN_WORD_LEN, f"hangman word too short: {w!r}"
+        assert w == w.upper(), f"hangman entry not uppercase: {w!r}"
+        assert all("A" <= ch <= "Z" or ch == " " for ch in w), \
+            f"hangman entry has non A-Z/space chars: {w!r}"
+        assert "  " not in w and not w.startswith(" ") and not w.endswith(" "), \
+            f"hangman entry has bad spacing: {w!r}"
+        letters = [ch for ch in w if ch != " "]
+        assert len(letters) >= MIN_WORD_LETTERS, f"hangman entry too short: {w!r}"
+        assert w not in seen_words, f"duplicate hangman entry: {w!r}"
+        seen_words.add(w)
     seen = set()
     for entry in TRIVIA:
         assert entry["q"] and entry["answers"], f"bad trivia entry: {entry!r}"
